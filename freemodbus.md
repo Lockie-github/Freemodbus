@@ -60,9 +60,9 @@ static void start_freemosbus_task(void *param)
 #### example
 read usRegInputBuf 
     
-    command:01 04 00 00 00 04 CRCH CRCL
+    command:01 04 00 00 00 04 CRCL CRCH
     01(设备地址) 04(读输入寄存器) 00 00(寄存器起始地址) 00 04(寄存器数量) 
-    respond:01 04 04 00 00 00 00 00 00 00 00 CRCH CRCL
+    respond:01 04 04 00 00 00 00 00 00 00 00 CRCL CRCH
     01(设备地址) 04(功能码) 04(字节数) 0000 0000 0000 0000(读到的寄存器数据)
 
 #### circuit
