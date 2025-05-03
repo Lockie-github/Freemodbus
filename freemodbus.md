@@ -2,25 +2,108 @@
 #### 创建一个定时器
 Modbus协议栈需要一个定时器来检测帧的结束。定时器的分辨率应为串行字符时间的一半。例如，对于 38400 波特，假设单个字符为 11 位，字符时间约为280us。协议栈使用的最小超时是字符超时的3.5倍。在/rtu/mbrtu.c的`eMBRTUInit`函数中根据定时器配置信息修改`usTimerT35_50us`的计算公式,确认定时器工作正常后,在定时器的回调函数中需要调用port/porttimer.c中的`prvvTIMERExpiredISR`函数
 #### 创建一个串口
-同样的,需要创建一个uart来接收和发送数据,确认uart的中断收发正常后,在接收中断中调用port/portserial.c中的`prvvUARTRxISR`函数,在发送中断中调用port/portserial.c中的`prvvUARTTxReadyISR`函数,此处需要注意的是串口接收的具体实现
+同样的,需要创建一个uart来接收和发送数据,确认uart的中断收发正常后,在接收中断中调用port/portserial.c中的`prvvUARTRxISR`函数,在发送中断中调用port/portserial.c中的`prvvUARTTxReadyISR`函数,此处需要注意的是串口接收的具体实现,为了提高命令的响应速度,在串口的回调中加入 `xQueueSendFromISR(xQueue_MODBUS,&_flag,&xHigherPriorityTaskWoken);`和`portYIELD_FROM_ISR(xHigherPriorityTaskWoken); `
+##### example
+###### bare metal
+回调函数
+```c
+static void uart_handleIrqEvent(app_uart_evt_t *pEvent)
+{
+
+    switch (pEvent->evt_type)
+    {
+    case APP_UART_DATA_READY: // 已接收到UART数据
+        
+        break;
+    case APP_UART_COMMUNICATION_ERROR: // 接收过程中发生通信错误
+        NRF_LOG_ERROR("APP_UART_COMMUNICATION_ERROR %s %d",__FILE__,__LINE__);
+        
+        break;
+    case APP_UART_FIFO_ERROR: // app_uart模块使用的FIFO模块中出现错误
+        NRF_LOG_ERROR("APP_UART_FIFO_ERROR %s %d",__FILE__,__LINE__);
+        
+        break;
+    case APP_UART_TX_EMPTY:
+        prvvUARTTxReadyISR();
+        
+        break;
+    case APP_UART_DATA: //
+        app_uart_get(uart_recv_buf+uart_recv_cnt);
+        uart_recv_cnt = (uart_recv_cnt+1)%128;
+        prvvUARTRxISR();
+        
+        break;
+    default:
+        break;
+    }
+}
+```
+
+###### FreeRTOS
+回调函数
+```c
+static void uart_handleIrqEvent(app_uart_evt_t *pEvent)
+{
+
+    switch (pEvent->evt_type)
+    {
+    case APP_UART_DATA_READY: // 已接收到UART数据
+
+        break;
+    case APP_UART_COMMUNICATION_ERROR: // 接收过程中发生通信错误
+        NRF_LOG_ERROR("APP_UART_COMMUNICATION_ERROR %s %d",__FILE__,__LINE__);
+        
+        break;
+    case APP_UART_FIFO_ERROR: // app_uart模块使用的FIFO模块中出现错误
+        NRF_LOG_ERROR("APP_UART_FIFO_ERROR %s %d",__FILE__,__LINE__);
+       
+        break;
+    case APP_UART_TX_EMPTY:
+        prvvUARTTxReadyISR();
+    
+        break;
+    case APP_UART_DATA: //
+        app_uart_get(uart_recv_buf+uart_recv_cnt);
+        uart_recv_cnt = (uart_recv_cnt+1)%128;
+        prvvUARTRxISR();
+        xQueueSendFromISR(xQueue_MODBUS,&_flag,&xHigherPriorityTaskWoken);
+        portYIELD_FROM_ISR(xHigherPriorityTaskWoken); 
+
+        break;
+    default:
+        break;
+    }
+}
+```
 #### 完善modbuslld
 确保定时器和uart功能正常后,完善modbus_lld/modbus_lld.c中的接口,该部分需要根据芯片的不同自行定义,注意`vMBLLDGetByte`函数的实现,该函数为串口接收方式的实现
 #### 配置寄存器
 首先确保port/modbus_port.h中的`ENTER_CRITICAL_SECTION`和`EXIT_CRITICAL_SECTION`工作正常,然后根据需求配置相关寄存器的地址和数量,配置完成后modbus协议栈的数据将直接写入这些寄存器,或者直接从这些寄存器中读取数据
 #### 创建modbus线程
+##### bare metal
+在裸机中,直接调用`(void)eMBPoll();`查询即可
+##### FreeRTOS
 ```c
 static void start_freemosbus_task(void *param)
 {
-    eMBInit(MB_RTU, 0x01, 1, 9600, MB_PAR_NONE);  //初始化FreeModbus
+    UNUSED_PARAMETER(param);
+    xQueue_MODBUS = xQueueCreate(5, sizeof(flag));
     
+    eMBInit(MB_RTU, 0x01, 1, 9600, MB_PAR_NONE);  //初始化FreeModbus
     eMBEnable();  //启动FreeModbus
-
+    
     while (1)
     {  
-        (void)eMBPoll();  //查询数据帧
-        vTaskDelay(100);
+        if (xQueueReceive(xQueue`_MODBUS, &flag, portMAX_DELAY) == pdPASS)
+        {
+            (void)eMBPoll();  //查询数据帧
+            vTaskDelay(10);
+        }
+        else
+        {
+            taskYIELD();
+        }
     }
-    
 }
 ```
 ### modbus 协议
@@ -103,14 +186,14 @@ read usRegInputBuf
 | mbcrc.c |  |  |
 |  | usMBCRC16 | 获取CRC |
 | mbrtu.c |  |  |
-| eMBRTUInit | 初始化串口和定时器 |
-| eMBRTUStart | 修改modbus状态,使能接收&定时器 |
-| eMBRTUStop | 关闭接收、发送和定时器 |
-| eMBRTUReceive | 提取接收到的数据帧中的PDU并传递PDU的地址和长度 |
-| eMBRTUSend | 拼接要发送的帧,并修改modbus状态发送状态 | 
-| xMBRTUReceiveFSM | 接收状态机 |
-| xMBRTUTransmitFSM | 发送状态机 |
-| xMBRTUTimerT35Expired | T3.5 |
+|  |eMBRTUInit | 初始化串口和定时器 |
+|  |eMBRTUStart | 修改modbus状态,使能接收&定时器 |
+|  |eMBRTUStop | 关闭接收、发送和定时器 |
+|  |eMBRTUReceive | 提取接收到的数据帧中的PDU并传递PDU的地址和长度 |
+|  |eMBRTUSend | 拼接要发送的帧,并修改modbus状态发送状态 | 
+|  |xMBRTUReceiveFSM | 接收状态机 |
+|  |xMBRTUTransmitFSM | 发送状态机 |
+|  |xMBRTUTimerT35Expired | T3.5 |
 
 #### mb.c
 | file | API | description |
